@@ -6,8 +6,13 @@ use base qw(Exporter);
 use Config;
 use File::Spec;
 
+use ExtUtils::MakeMaker 6.57_10 ();
+
+our $VERSION = '0.001000';
+$VERSION = eval $VERSION;
+
 our @EXPORT = qw(
-  author manifest_include run_preflight
+  author repository bugtracker irc manifest_include run_preflight
 );
 
 sub import {
@@ -16,6 +21,9 @@ sub import {
 }
 
 sub author { our $Author = shift }
+sub repository { our $Repository = shift }
+sub bugtracker { our $Bugtracker = shift }
+sub irc { our $IRC = shift }
 
 our $Ran_Preflight;
 
@@ -111,9 +119,84 @@ END
   no warnings 'redefine';
   sub main::WriteMakefile {
     my %args = @_;
+    if (!exists $args{VERSION_FROM}) {
+      my $main = $args{NAME};
+      $main =~ s{-|::}{/}g;
+      $main = "lib/$main.pm";
+      if (-e $main) {
+        $args{VERSION_FROM} = $main;
+      }
+    }
+    $args{LICENSE} ||= 'perl';
+
+    if (-d 'xt') {
+      push @{$args{META_MERGE}{no_index}{directory}||=[]}, 'xt';
+    }
+
+    my %meta_add = %{$args{META_ADD}||{}};
+    $meta_add{'meta-spec'}{'version'} = 2;
+    $meta_add{prereqs}{configure}{requires} = \%{$args{CONFIGURE_REQUIRES}||{}};
+    $meta_add{prereqs}{build}{requires} = \%{$args{BUILD_REQUIRES}||{}};
+    $meta_add{prereqs}{test}{requires} = \%{$args{TEST_REQUIRES}||{}};
+    $meta_add{prereqs}{runtime}{requires} = \%{$args{PREREQ_PM}||{}};
+    if ($args{MIN_PERL_VERSION}) {
+      $meta_add{prereqs}{runtime}{requires}{perl} = $args{MIN_PERL_VERSION};
+    }
+    if (our $Repository) {
+      $meta_add{resources}{repository} = ref $Repository ? $Repository : do {
+        if ($Repository =~ m{^\w+://github\.com/(.*?)(?:\.git)?$}) {
+          {
+            url => "git://github.com/$1.git",
+            web => "http://github.com/$1",
+            type => 'git',
+          };
+        }
+        elsif ($Repository =~ m{^\w+://git\.shadowcat\.co\.uk/(.*?)(?:\.git)?$}) {
+          {
+            url => "git://git.shadowcat.co.uk/$1.git",
+            web => "http://git.shadowcat.co.uk/gitweb/gitweb.cgi?p=$1.git",
+            type => 'git',
+          };
+        }
+        else {
+          {
+            url => $Repository,
+          };
+        }
+      };
+    }
+    if (our $IRC) {
+      $meta_add{resources}{x_IRC} = $IRC;
+    }
+    if (our $Bugtracker) {
+      $meta_add{resources}{bugtracker} = ref $Bugtracker ? $Bugtracker : do {
+        if (lc $Bugtracker eq 'rt') {
+          my $name = $args{NAME};
+          $name =~ s/::/-/g;
+          {
+            web => "http://rt.cpan.org/NoAuth/Bugs.html?Dist=$name",
+            mailto => 'bug-'.lc $name.'@rt.cpan.org',
+          };
+        }
+        elsif ($Bugtracker =~ /^mailto:(.*)/) {
+          { mailto => $1 };
+        }
+        else {
+          { web => $Bugtracker };
+        }
+      };
+    }
+    if ($args{LICENSE} eq 'perl') {
+      $meta_add{resources}{license} ||= [ 'http://dev.perl.org/licenses/' ];
+    }
+    $args{META_ADD} = \%meta_add;
+    if ($args{META_MERGE}) {
+      $args{META_MERGE}{'meta-spec'}{'version'} = 2;
+    }
     ExtUtils::MakeMaker::WriteMakefile(
-      LICENSE => 'perl',
-      @_, AUTHOR => our $Author, ABSTRACT_FROM => $args{VERSION_FROM},
+      %args,
+      AUTHOR => our $Author,
+      ABSTRACT_FROM => $args{VERSION_FROM},
       test => { TESTS => ($args{test}{TESTS}||'t/*.t').' xt/*.t' },
     );
   }
