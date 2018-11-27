@@ -1,0 +1,121 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+my $dist = shift;
+my $distdir = shift;
+
+use File::Find ();
+use File::Spec ();
+use File::Temp ();
+use JSON::PP ();
+use HTTP::Tiny ();
+use Cwd ();
+use Text::ParseWords ();
+
+my $get;
+if (HTTP::Tiny->can_ssl) {
+  $get = sub {
+    HTTP::Tiny->new->get(@_)->{content} || '';
+  };
+}
+else {
+  my $curl = `which curl`;
+  chomp $curl;
+  if (-x $curl) {
+    $get = sub {
+      open my $fh, '-|', 'curl', '-L', '--', @_;
+      scalar do { local $/; <$fh> };
+    };
+  }
+  else {
+    my $wget = `which wget`;
+    chomp $wget;
+    if (-x $get) {
+      $get = sub {
+        open my $fh, '-|', 'wget', '-O', '-', '--', @_;
+        scalar do { local $/; <$fh> };
+      };
+    }
+  }
+}
+
+$distdir = File::Spec->canonpath($distdir);
+my $dist_data = JSON::PP::decode_json($get->('https://fastapi.metacpan.org/v1/release/'.$dist));
+my $download_url = $dist_data->{download_url} || die;
+
+my $file = $download_url;
+$file =~ s{.*/}{};
+my $tempdir = File::Temp->newdir('Distar-dist-diff-XXXXXX', TMPDIR => 1);
+
+my $dist_file = File::Spec->catfile($tempdir, $file);
+
+{
+  open my $fh, '>:raw', $dist_file
+    or die "can't open $dist_file: $!";
+  print $fh $get->($download_url);
+  close $fh;
+}
+
+my $type = $file =~ /\.gz$/ ? 'z' : $file =~ /\.bz2$/ ? 'j' : '';
+
+{
+  my $cwd = Cwd::cwd();
+  chdir $tempdir;
+  system 'tar', 'x'.$type.'f', $file and die "failed to extract";
+  chdir $cwd;
+}
+
+my ($extracted_dir) = glob($tempdir.'/*/');
+$extracted_dir = File::Spec->canonpath($extracted_dir);
+
+my $color_code = qr{\e\[[0-9;]*m};
+
+my $cpan = 'c';
+my $local = 'l';
+
+my @git_cmd = qw(git diff --no-index);
+
+my $color = `git config color.diff`;
+chomp $color;
+if (!$color) {
+  $color = `git config color.ui`;
+  chomp $color;
+}
+if ($color eq 'always' || $color eq 'auto' && -t STDOUT) {
+  push @git_cmd, '--color';
+}
+
+my $pager = $ENV{GIT_PAGER};
+if (!$pager) {
+  $pager = `git config pager.diff`;
+  chomp $pager;
+}
+if (!$pager) {
+  $pager = `git config core.pager`;
+  chomp $pager;
+}
+if (!$pager) {
+  $pager = $ENV{PAGER};
+}
+if (!$pager) {
+  $pager = 'less';
+}
+$ENV{LESS} ||= 'FRX';
+
+my $out;
+if ($pager) {
+  my @pager = Text::ParseWords::shellwords($pager);
+  open $out, '|-', @pager;
+}
+else {
+  $out = \*STDOUT;
+}
+
+open my $fh, '-|', @git_cmd, '--', $extracted_dir, $distdir;
+while (my $line = <$fh>) {
+  $line =~ s{^((?:${color_code})?diff --git )1(?:/?\Q$extracted_dir\E|/?\Q$distdir\E)(/.*? )2(?:/?\Q$extracted_dir\E|/?\Q$distdir\E)(/)}{${1}${cpan}${2}${local}${3}};
+  $line =~ s{^((?:${color_code})?--- )1(?:/?\Q$extracted_dir\E)}{${1}${cpan}};
+  $line =~ s{^((?:${color_code})?\+\+\+ )2(?:/?\Q$distdir\E)}{${1}${local}};
+  print { $out } $line;
+}
